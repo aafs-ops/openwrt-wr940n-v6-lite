@@ -1,0 +1,18 @@
+#!/bin/sh /etc/rc.common
+# Tiny web GUI: BusyBox httpd + /www/cgi-bin/gui
+START=50
+USE_PROCD=1
+
+start_service() {
+	[ -f /etc/httpd.conf ] || { umask 077; echo 'A:*' > /etc/httpd.conf; }
+	umask 077
+	dd if=/dev/urandom bs=16 count=1 2>/dev/null | hexdump -e '16/1 "%02x"' > /var/run/webgui.token
+	procd_open_instance
+	procd_set_param command /usr/sbin/httpd -f -p 0.0.0.0:80 -h /www -c /etc/httpd.conf
+	procd_set_param respawn
+	procd_close_instance
+}
+
+reload_service() {
+	killall -HUP httpd 2>/dev/null
+}

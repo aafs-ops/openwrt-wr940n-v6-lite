@@ -1,0 +1,4 @@
+#!/bin/sh
+# Fetch the blocklist once the internet connection is up (the list lives in RAM).
+[ "$ACTION" = ifup ] && [ "$INTERFACE" = wan ] || exit 0
+( sleep 15; /usr/sbin/adblock update ) >/dev/null 2>&1 </dev/null &

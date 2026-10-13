@@ -1,0 +1,31 @@
+#!/bin/sh /etc/rc.common
+# 1) Self-repair: 60 s after boot, if the LAN has no IPv4 address, drop any saved
+#    network/DHCP settings (falls back to the built-in, known-good ones) and restart.
+# 2) Saves a short status report to /root/bootdiag.txt (2 minutes after boot).
+START=99
+
+# A /32 address counts as broken too: nobody can reach the router on it.
+lan_ok() { ip -4 addr show br-lan 2>/dev/null | grep 'inet ' | grep -qv '/32 '; }
+
+start() {
+	(
+	sleep 60
+	if ! lan_ok; then
+		logger -t bootdiag "LAN has no address - restoring built-in network settings"
+		for f in network dhcp; do
+			[ -e "/overlay/upper/etc/config/$f" ] && rm -f "/overlay/upper/etc/config/$f"
+		done
+		echo 3 > /proc/sys/vm/drop_caches
+		/etc/init.d/network restart
+		sleep 15
+		/etc/init.d/dnsmasq restart
+		/etc/init.d/firewall restart
+	fi
+	sleep 60
+	{ date; uptime 2>/dev/null; echo; ip -4 addr; echo; ip route; echo
+	  echo "--- overlay"; df -k /overlay 2>/dev/null || cat /proc/mounts | grep overlay
+	  echo; iptables -S; echo; ps w; echo; logread | tail -150
+	} > /root/bootdiag.txt 2>&1
+	sync
+	) >/dev/null 2>&1 </dev/null &
+}

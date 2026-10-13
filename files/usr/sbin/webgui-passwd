@@ -1,0 +1,12 @@
+#!/bin/sh
+# Set one password for both SSH (root) and the web GUI.
+printf 'New password (min 8 chars): '; read -rs p1; echo
+printf 'Repeat: '; read -rs p2; echo
+[ ${#p1} -ge 8 ] || { echo "Too short."; exit 1; }
+[ "$p1" = "$p2" ] || { echo "Passwords do not match."; exit 1; }
+case "$p1" in *:*) echo "Password cannot contain ':'."; exit 1 ;; esac
+printf '%s\n%s\n' "$p1" "$p1" | passwd root >/dev/null 2>&1 || { echo "passwd failed"; exit 1; }
+umask 077
+printf 'A:*\n/:root:%s\n' "$(httpd -m "$p1")" > /etc/httpd.conf.new && mv /etc/httpd.conf.new /etc/httpd.conf
+killall -HUP httpd 2>/dev/null
+echo "Done. Log in to the web GUI as root with this password."

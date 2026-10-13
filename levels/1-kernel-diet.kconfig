@@ -1,0 +1,39 @@
+# Level 1: kernel parts the TL-WR940N v6 (TP9343) does not have or use.
+# Appended to target/linux/ath79/tiny/config-default. Watchdog, switch, SPI flash, Wi-Fi, NVMEM stay.
+# CONFIG_PCI is not set
+# CONFIG_PCI_AR71XX is not set
+# CONFIG_PCI_AR724X is not set
+# CONFIG_AT803X_PHY is not set
+# CONFIG_QCOM_NET_PHYLIB is not set
+# CONFIG_GPIO_74X164 is not set
+# CONFIG_MDIO_GPIO is not set
+# CONFIG_MDIO_BITBANG is not set
+# CONFIG_SPI_GPIO is not set
+# CONFIG_SPI_BITBANG is not set
+# CONFIG_SPI_ATH79 is not set
+# CONFIG_SERIAL_AR933X is not set
+# CONFIG_SERIAL_AR933X_CONSOLE is not set
+# CONFIG_SERIAL_8250_DMA is not set
+# CONFIG_MTD_PHYSMAP is not set
+# CONFIG_MTD_CFI_ADV_OPTIONS is not set
+# CONFIG_MTD_PARSER_CYBERTAN is not set
+# CONFIG_MTD_SPLIT_ELF_FW is not set
+# CONFIG_MTD_SPLIT_LZMA_FW is not set
+# CONFIG_MTD_SPLIT_SEAMA_FW is not set
+# CONFIG_MTD_SPLIT_UIMAGE_FW is not set
+# CONFIG_MTD_SPLIT_WRGG_FW is not set
+# CONFIG_MTD_VIRT_CONCAT is not set
+# CONFIG_AG71XX_LEGACY_DEBUG_FS is not set
+# CONFIG_BPF_SYSCALL is not set
+# CONFIG_BPF_JIT is not set
+# CONFIG_NET_SWITCHDEV is not set
+# CONFIG_SYSVIPC is not set
+# CONFIG_INPUT_MISC is not set
+# CONFIG_MSDOS_PARTITION is not set
+# CONFIG_NET_SELFTESTS is not set
+# CONFIG_IP_ROUTE_MULTIPATH is not set
+# CONFIG_IP_ROUTE_VERBOSE is not set
+CONFIG_SLUB_TINY=y
+CONFIG_BASE_SMALL=y
+# NOTE: BRIDGE_VLAN_FILTERING and BRIDGE_IGMP_SNOOPING must stay enabled: netifd always sends
+# those bridge attributes and the kernel rejects the whole bridge (no br-lan, no LAN) without them.

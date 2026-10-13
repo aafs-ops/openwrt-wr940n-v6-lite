@@ -1,0 +1,151 @@
+# OpenWrt 25.12.x — TP-Link TL-WR940N v6 (EU) — 4 MB flash / 32 MB RAM
+# Base level. build.sh adds deeper trim levels on top of this only if the image doesn't fit.
+CONFIG_TARGET_ath79=y
+CONFIG_TARGET_ath79_tiny=y
+CONFIG_TARGET_ath79_tiny_DEVICE_tplink_tl-wr940n-v6=y
+
+# ---- Squashfs: 256 KiB blocks (better compression than the 64 KiB low-RAM default) ----
+CONFIG_TARGET_SQUASHFS_BLOCK_SIZE=256
+
+# ---- No package manager or package database (no room to install packages anyway) ----
+# CONFIG_USE_APK is not set
+# CONFIG_PACKAGE_apk-mbedtls is not set
+# CONFIG_PACKAGE_apk-openssl is not set
+# CONFIG_PACKAGE_opkg is not set
+CONFIG_CLEAN_IPKG=y
+# CONFIG_SIGNED_PACKAGES is not set
+# CONFIG_PACKAGE_usign is not set
+# CONFIG_PACKAGE_openwrt-keyring is not set
+
+# ---- Removed: PPP / PPPoE ----
+# CONFIG_PACKAGE_ppp is not set
+# CONFIG_PACKAGE_ppp-mod-pppoe is not set
+# CONFIG_PACKAGE_kmod-ppp is not set
+# CONFIG_PACKAGE_kmod-pppoe is not set
+# CONFIG_PACKAGE_kmod-pppox is not set
+
+# ---- Removed: IPv6 userspace ----
+# CONFIG_PACKAGE_odhcp6c is not set
+# CONFIG_PACKAGE_odhcpd-ipv6only is not set
+# CONFIG_PACKAGE_odhcpd is not set
+
+# ---- Firewall: legacy iptables + a fixed, strict ruleset instead of firewall4/nftables ----
+# CONFIG_PACKAGE_firewall4 is not set
+# CONFIG_PACKAGE_nftables-json is not set
+# CONFIG_PACKAGE_nftables-nojson is not set
+# CONFIG_PACKAGE_kmod-nft-offload is not set
+# CONFIG_PACKAGE_kmod-nft-core is not set
+# CONFIG_PACKAGE_kmod-nft-nat is not set
+# CONFIG_PACKAGE_kmod-nft-fib is not set
+CONFIG_PACKAGE_iptables-zz-legacy=y
+CONFIG_PACKAGE_kmod-ipt-core=y
+CONFIG_PACKAGE_kmod-ipt-conntrack=y
+CONFIG_PACKAGE_kmod-ipt-nat=y
+
+# ---- Wi-Fi: WPA3-Personal (SAE), WPA2/WPA3 mixed, OWE, 802.11w (PMF) ----
+# CONFIG_PACKAGE_wpad-basic-mbedtls is not set
+# CONFIG_PACKAGE_hostapd-mini is not set
+CONFIG_PACKAGE_hostapd-basic-mbedtls=y
+# CONFIG_PACKAGE_MAC80211_DEBUGFS is not set
+# CONFIG_PACKAGE_MAC80211_MESH is not set
+# CONFIG_PACKAGE_MAC80211_MESSAGE_TRACING is not set
+
+# ---- mbedTLS: keep modern crypto only (WPA3 SAE + TLS 1.2/1.3 for blocklist downloads) ----
+# CONFIG_MBEDTLS_ARIA_C is not set
+# CONFIG_MBEDTLS_CAMELLIA_C is not set
+# CONFIG_MBEDTLS_DES_C is not set
+# CONFIG_MBEDTLS_NIST_KW_C is not set
+# CONFIG_MBEDTLS_RIPEMD160_C is not set
+# CONFIG_MBEDTLS_CIPHER_MODE_OFB is not set
+# CONFIG_MBEDTLS_CIPHER_MODE_XTS is not set
+# CONFIG_MBEDTLS_KEY_EXCHANGE_PSK_ENABLED is not set
+# CONFIG_MBEDTLS_KEY_EXCHANGE_DHE_PSK_ENABLED is not set
+# CONFIG_MBEDTLS_KEY_EXCHANGE_ECDHE_PSK_ENABLED is not set
+# CONFIG_MBEDTLS_KEY_EXCHANGE_RSA_PSK_ENABLED is not set
+# CONFIG_MBEDTLS_KEY_EXCHANGE_RSA_ENABLED is not set
+# CONFIG_MBEDTLS_KEY_EXCHANGE_DHE_RSA_ENABLED is not set
+# CONFIG_MBEDTLS_KEY_EXCHANGE_ECDH_ECDSA_ENABLED is not set
+# CONFIG_MBEDTLS_KEY_EXCHANGE_ECDH_RSA_ENABLED is not set
+# CONFIG_MBEDTLS_KEY_EXCHANGE_ECJPAKE_ENABLED is not set
+CONFIG_MBEDTLS_KEY_EXCHANGE_ECDHE_RSA_ENABLED=y
+CONFIG_MBEDTLS_KEY_EXCHANGE_ECDHE_ECDSA_ENABLED=y
+# CONFIG_MBEDTLS_ECP_DP_SECP192R1_ENABLED is not set
+# CONFIG_MBEDTLS_ECP_DP_SECP224R1_ENABLED is not set
+CONFIG_MBEDTLS_ECP_DP_SECP256R1_ENABLED=y
+CONFIG_MBEDTLS_ECP_DP_SECP384R1_ENABLED=y
+CONFIG_MBEDTLS_ECP_DP_SECP521R1_ENABLED=y
+# CONFIG_MBEDTLS_ECP_DP_SECP192K1_ENABLED is not set
+# CONFIG_MBEDTLS_ECP_DP_SECP224K1_ENABLED is not set
+# CONFIG_MBEDTLS_ECP_DP_SECP256K1_ENABLED is not set
+# CONFIG_MBEDTLS_ECP_DP_BP256R1_ENABLED is not set
+# CONFIG_MBEDTLS_ECP_DP_BP384R1_ENABLED is not set
+# CONFIG_MBEDTLS_ECP_DP_BP512R1_ENABLED is not set
+CONFIG_MBEDTLS_ECP_DP_CURVE25519_ENABLED=y
+# CONFIG_MBEDTLS_ECP_DP_CURVE448_ENABLED is not set
+# CONFIG_MBEDTLS_DEBUG_C is not set
+# CONFIG_MBEDTLS_SELF_TEST is not set
+# CONFIG_MBEDTLS_VERSION_FEATURES is not set
+# CONFIG_MBEDTLS_SSL_RENEGOTIATION is not set
+# CONFIG_MBEDTLS_THREADING_C is not set
+# CONFIG_MBEDTLS_THREADING_PTHREAD is not set
+# CONFIG_MBEDTLS_SSL_TLS1_3_KEY_EXCHANGE_MODE_PSK_ENABLED is not set
+# CONFIG_MBEDTLS_SSL_TLS1_3_KEY_EXCHANGE_MODE_PSK_EPHEMERAL_ENABLED is not set
+CONFIG_MBEDTLS_SSL_PROTO_TLS1_2=y
+CONFIG_MBEDTLS_SSL_PROTO_TLS1_3=y
+
+# ---- Ad blocking: HTTPS download of blocklists (uses the same mbedTLS) ----
+CONFIG_PACKAGE_uclient-fetch=y
+CONFIG_PACKAGE_libustream-mbedtls=y
+# CONFIG_PACKAGE_ca-bundle is not set
+# CONFIG_PACKAGE_ca-certificates is not set
+
+# ---- Small removals ----
+# CONFIG_PACKAGE_urngd is not set
+# CONFIG_PACKAGE_uboot-envtools is not set
+# CONFIG_PACKAGE_procd-seccomp is not set
+
+# ---- SSH: server only, modern algorithms only, no forwarding ----
+# CONFIG_DROPBEAR_LEGACY_COMPAT is not set
+# CONFIG_DROPBEAR_DBCLIENT is not set
+# CONFIG_DROPBEAR_SVR_AGENTFWD is not set
+# CONFIG_DROPBEAR_SVR_REMOTETCPFWD is not set
+# CONFIG_DROPBEAR_SVR_LOCALTCPFWD is not set
+# CONFIG_DROPBEAR_SVR_LOCALSTREAMFWD is not set
+# CONFIG_DROPBEAR_SVR_PUBKEY_OPTIONS is not set
+# CONFIG_DROPBEAR_DH_GROUP14_SHA256 is not set
+CONFIG_DROPBEAR_CURVE25519=y
+CONFIG_DROPBEAR_CHACHA20POLY1305=y
+
+# ---- Kernel features this router never uses ----
+# CONFIG_KERNEL_DEBUG_FS is not set
+# CONFIG_KERNEL_KALLSYMS is not set
+# CONFIG_KERNEL_DEBUG_KERNEL is not set
+# CONFIG_KERNEL_DEBUG_INFO is not set
+# CONFIG_KERNEL_MAGIC_SYSRQ is not set
+# CONFIG_KERNEL_COREDUMP is not set
+# CONFIG_KERNEL_ELF_CORE is not set
+# CONFIG_KERNEL_IO_URING is not set
+# CONFIG_KERNEL_SWAP is not set
+# CONFIG_KERNEL_AIO is not set
+# CONFIG_USE_SECCOMP is not set
+# CONFIG_KERNEL_SECCOMP is not set
+# CONFIG_KERNEL_SECCOMP_FILTER is not set
+# CONFIG_KERNEL_IP_MROUTE is not set
+# CONFIG_KERNEL_PRINTK_TIME is not set
+
+# ---- BusyBox: web server for the GUI, drop applets nothing here uses ----
+CONFIG_BUSYBOX_CUSTOM=y
+CONFIG_BUSYBOX_CONFIG_HTTPD=y
+CONFIG_BUSYBOX_CONFIG_FEATURE_HTTPD_BASIC_AUTH=y
+CONFIG_BUSYBOX_CONFIG_FEATURE_HTTPD_AUTH_MD5=y
+CONFIG_BUSYBOX_CONFIG_FEATURE_HTTPD_CGI=y
+# CONFIG_BUSYBOX_CONFIG_SWAPON is not set
+# CONFIG_BUSYBOX_CONFIG_SWAPOFF is not set
+# CONFIG_BUSYBOX_CONFIG_MKSWAP is not set
+# CONFIG_BUSYBOX_CONFIG_TIME is not set
+# CONFIG_BUSYBOX_CONFIG_RESIZE is not set
+# CONFIG_BUSYBOX_CONFIG_BRCTL is not set
+# CONFIG_BUSYBOX_CONFIG_LESS is not set
+# CONFIG_BUSYBOX_CONFIG_NC is not set
+# CONFIG_BUSYBOX_CONFIG_PING6 is not set
+# CONFIG_BUSYBOX_CONFIG_TRACEROUTE6 is not set

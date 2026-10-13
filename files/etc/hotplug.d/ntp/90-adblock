@@ -1,0 +1,11 @@
+#!/bin/sh
+# Mark the clock as trustworthy once NTP has set it (TLS certificate checks need real time).
+case "$ACTION" in
+	step) ;;
+	stratum) [ "${stratum:-16}" -lt 16 ] 2>/dev/null || exit 0 ;;
+	*) exit 0 ;;
+esac
+[ -f /tmp/ntp.synced ] && exit 0
+touch /tmp/ntp.synced
+grep -q '^state=active' /tmp/adblock.status 2>/dev/null || \
+	( sleep 5; /usr/sbin/adblock update ) >/dev/null 2>&1 </dev/null &

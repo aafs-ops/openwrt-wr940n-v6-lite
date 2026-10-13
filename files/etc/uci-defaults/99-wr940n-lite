@@ -1,0 +1,9 @@
+#!/bin/sh
+# All settings ship ready-made in /etc/config (read-only firmware). Only enable our services.
+/etc/init.d/webgui enable
+/etc/init.d/firewall enable
+/etc/init.d/cron enable
+/etc/init.d/bootdiag enable
+/etc/init.d/ledstate enable
+uci -q delete system.led_wan && uci commit system
+exit 0

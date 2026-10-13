@@ -1,0 +1,9 @@
+#!/bin/sh
+# On this TL-WR940N v6 build the reset button's input glitches while the network switch
+# is being reset during boot, which used to force failsafe on every boot. Only the
+# Wi-Fi button (stable) enters failsafe. TFTP recovery (hold Reset at power-on) is
+# handled by the bootloader and is not affected.
+[ "${TYPE}" = "switch" ] && return 0
+[ "${BUTTON}" = "reset" ] && return 0
+echo ${BUTTON} > /tmp/failsafe_button
+return 0

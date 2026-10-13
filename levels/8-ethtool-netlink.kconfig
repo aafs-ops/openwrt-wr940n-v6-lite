@@ -1,0 +1,6 @@
+# Level 8: ethtool's netlink interface (only used by the `ethtool` CLI, which is not installed;
+# netifd uses the ioctl interface, which stays), plus small unused syscalls.
+# CONFIG_ETHTOOL_NETLINK is not set
+# CONFIG_RSEQ is not set
+# CONFIG_MEMBARRIER is not set
+# CONFIG_ADVISE_SYSCALLS is not set

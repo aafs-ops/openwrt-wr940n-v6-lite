@@ -1,0 +1,2 @@
+# daily blocklist refresh
+17 4 * * * /usr/sbin/adblock update >/dev/null 2>&1

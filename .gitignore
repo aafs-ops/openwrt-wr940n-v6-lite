@@ -1,0 +1,6 @@
+# OpenWrt source tree, build output and logs are created by build.sh
+/openwrt/
+/output/
+*.log
+*.bin
+.DS_Store

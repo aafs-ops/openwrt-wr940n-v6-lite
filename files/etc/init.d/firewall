@@ -1,0 +1,100 @@
+#!/bin/sh /etc/rc.common
+# Lean stateful firewall for the TL-WR940N v6 build (replaces firewall4/nftables).
+# Policy: nothing from the internet (WAN port) gets in unless it is a reply.
+# Everything not arriving on the WAN port (LAN ports, Wi-Fi) is trusted.
+START=19
+STOP=90
+
+LAN=br-lan
+
+wan_dev() {
+	local d
+	d=$(uci -q get network.wan.device)
+	echo "${d:-eth1}"
+}
+
+rules() {
+	local WAN force
+	WAN=$(wan_dev)
+	force=$(uci -q get adblock.main.force_dns)
+	cat <<EOF
+*filter
+:INPUT DROP [0:0]
+:FORWARD DROP [0:0]
+:OUTPUT ACCEPT [0:0]
+-A INPUT -i lo -j ACCEPT
+-A INPUT -m conntrack --ctstate INVALID -j DROP
+-A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+-A INPUT ! -i $WAN -j ACCEPT
+-A INPUT -i $WAN -p udp --sport 67 --dport 68 -j ACCEPT
+-A INPUT -i $WAN -p icmp --icmp-type echo-request -m limit --limit 2/sec --limit-burst 5 -j ACCEPT
+-A FORWARD -m conntrack --ctstate INVALID -j DROP
+-A FORWARD -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+EOF
+	[ "$force" = 1 ] && cat <<EOF
+-A FORWARD ! -i $WAN -p tcp --dport 853 -j REJECT --reject-with tcp-reset
+-A FORWARD ! -i $WAN -p udp --dport 853 -j REJECT
+EOF
+	cat <<EOF
+-A FORWARD ! -i $WAN -o $WAN -j ACCEPT
+COMMIT
+*nat
+:PREROUTING ACCEPT [0:0]
+:INPUT ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+:POSTROUTING ACCEPT [0:0]
+EOF
+	[ "$force" = 1 ] && cat <<EOF
+-A PREROUTING ! -i $WAN -p udp --dport 53 -j REDIRECT --to-ports 53
+-A PREROUTING ! -i $WAN -p tcp --dport 53 -j REDIRECT --to-ports 53
+EOF
+	cat <<EOF
+-A POSTROUTING -o $WAN -j MASQUERADE
+COMMIT
+*mangle
+:PREROUTING ACCEPT [0:0]
+:INPUT ACCEPT [0:0]
+:FORWARD ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+:POSTROUTING ACCEPT [0:0]
+-A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+COMMIT
+EOF
+}
+
+sysctls() {
+	for f in all default; do
+		echo 1 > /proc/sys/net/ipv4/conf/$f/rp_filter 2>/dev/null
+		echo 0 > /proc/sys/net/ipv4/conf/$f/accept_redirects 2>/dev/null
+		echo 0 > /proc/sys/net/ipv4/conf/$f/send_redirects 2>/dev/null
+		echo 0 > /proc/sys/net/ipv4/conf/$f/accept_source_route 2>/dev/null
+		[ -d /proc/sys/net/ipv6 ] && echo 1 > /proc/sys/net/ipv6/conf/$f/disable_ipv6
+	done
+	echo 1 > /proc/sys/net/ipv4/tcp_syncookies
+	echo 1 > /proc/sys/net/ipv4/ip_forward
+}
+
+start() {
+	sysctls
+	if ! rules | iptables-restore; then
+		# Never leave the router wide open: fall back to LAN-only access, no forwarding.
+		logger -t firewall "ruleset failed to load, using lockdown rules"
+		iptables -P INPUT DROP; iptables -P FORWARD DROP
+		iptables -F INPUT; iptables -F FORWARD
+		iptables -A INPUT -i lo -j ACCEPT
+		iptables -A INPUT ! -i "$(wan_dev)" -j ACCEPT
+		iptables -A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+		return 1
+	fi
+}
+
+stop() {
+	# Stopping the firewall keeps the router reachable from LAN only.
+	iptables -P INPUT DROP; iptables -P FORWARD DROP
+	iptables -F; iptables -t nat -F; iptables -t mangle -F
+	iptables -A INPUT -i lo -j ACCEPT
+	iptables -A INPUT ! -i "$(wan_dev)" -j ACCEPT
+}
+
+reload() { start; }
+restart() { start; }

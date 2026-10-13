@@ -1,0 +1,7 @@
+config adblock 'main'
+	option enabled '1'
+	option preset 'light'
+	option source 'https://raw.githubusercontent.com/hagezi/dns-blocklists/main/dnsmasq/light.txt'
+	option mirror 'https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/dnsmasq/light.txt'
+	option max_domains '60000'
+	option force_dns '0'

@@ -1,0 +1,22 @@
+# Level 5 (kernel part): parallel-NOR flash drivers (this board uses SPI flash only),
+# initramfs support, firmware-loader user helper, parallel crypto, policy routing, tc classifiers.
+# CONFIG_MTD_CFI is not set
+# CONFIG_MTD_JEDECPROBE is not set
+# CONFIG_MTD_CFI_AMDSTD is not set
+# CONFIG_MTD_CFI_INTELEXT is not set
+# CONFIG_MTD_GEN_PROBE is not set
+# CONFIG_MTD_COMPLEX_MAPPINGS is not set
+# CONFIG_MTD_PHYSMAP_OF is not set
+# CONFIG_MTD_CFI_GEOMETRY is not set
+# CONFIG_MTD_CMDLINE_PARTS is not set
+# CONFIG_BLK_DEV_INITRD is not set
+# CONFIG_FW_LOADER_USER_HELPER is not set
+# CONFIG_FW_LOADER_USER_HELPER_FALLBACK is not set
+# CONFIG_CRYPTO_PCRYPT is not set
+# CONFIG_IP_ADVANCED_ROUTER is not set
+# CONFIG_IP_MULTIPLE_TABLES is not set
+# CONFIG_NET_CLS is not set
+# CONFIG_LEDS_CLASS_MULTICOLOR is not set
+# CONFIG_SERIAL_MCTRL_GPIO is not set
+# CONFIG_MODULE_UNLOAD is not set
+# CONFIG_UID16 is not set

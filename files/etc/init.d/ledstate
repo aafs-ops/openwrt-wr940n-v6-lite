@@ -1,0 +1,29 @@
+#!/bin/sh /etc/rc.common
+# Front light: PURPLE (orange + blue) = all good: LAN has a proper address, Wi-Fi is
+# broadcasting and (in router mode) the address server is running.
+# ORANGE only = something is not ready / not working.
+START=99
+USE_PROCD=1
+
+start_service() {
+	procd_open_instance
+	procd_set_param command /bin/sh -c '
+		led() { for l in /sys/class/leds/*$1*; do [ -d "$l" ] || continue
+			echo none > "$l/trigger" 2>/dev/null; echo "$2" > "$l/brightness"; done; }
+		ok() {
+			ip -4 addr show br-lan 2>/dev/null | grep "inet " | grep -qv "/32 " || return 1
+			if [ "$(uci -q get dhcp.lan.ignore)" != 1 ]; then pidof dnsmasq >/dev/null || return 1; fi
+			for i in $(ls /sys/class/net); do
+				[ -e /sys/class/net/$i/phy80211 ] && [ "$(cat /sys/class/net/$i/operstate)" = up ] && return 0
+			done
+			return 1
+		}
+		last=
+		while :; do
+			if ok; then s=1; else s=0; fi
+			if [ "$s" != "$last" ]; then led orange 1; led blue $s; last=$s; fi
+			sleep 5
+		done'
+	procd_set_param respawn
+	procd_close_instance
+}

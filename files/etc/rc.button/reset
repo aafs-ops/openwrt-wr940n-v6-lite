@@ -1,0 +1,5 @@
+#!/bin/sh
+# The reset button input on this board glitches during switch resets/link changes.
+# Acting on it could reboot or factory-reset the router by itself, so it is ignored.
+# Reboot / factory reset: web GUI -> Admin. Recovery: hold Reset at power-on (TFTP).
+return 0

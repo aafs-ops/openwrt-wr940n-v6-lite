@@ -1,0 +1,455 @@
+#!/bin/sh
+# Tiny web GUI for OpenWrt on 4 MB routers (TL-WR940N v6).
+# Runs under BusyBox httpd as CGI. No JavaScript, no dependencies beyond the base system.
+
+TOKEN_FILE=/var/run/webgui.token
+HTTPD_CONF=/etc/httpd.conf
+
+# ---------- helpers ----------
+esc() { # HTML-escape stdin-free: esc "string"
+	printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' \
+		-e 's/"/\&quot;/g' -e "s/'/\&#39;/g"
+}
+urldecode() {
+	printf '%s' "$1" | awk 'BEGIN{for(i=0;i<256;i++)h[sprintf("%02x",i)]=i}
+	{s=$0; gsub(/\+/," ",s); o="";
+	 while((p=index(s,"%"))>0){ o=o substr(s,1,p-1); x=tolower(substr(s,p+1,2));
+	  if(x in h){o=o sprintf("%c",h[x]); s=substr(s,p+3)} else {o=o "%"; s=substr(s,p+1)} }
+	 printf "%s", o s}'
+}
+u() { uci -q get "$1"; }
+lan_ip() { u network.lan.ipaddr | awk '{sub(/\/.*/,"",$1); print $1}'; }
+token() { cat "$TOKEN_FILE" 2>/dev/null; }
+root_has_password() { ! grep -q '^root:[!*]*:' /etc/shadow 2>/dev/null; }
+gui_has_password() { grep -q '^/:root:' "$HTTPD_CONF" 2>/dev/null; }
+valid_ip() {
+	echo "$1" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || return 1
+	local IFS=.; set -- $1
+	for o in "$@"; do [ "$o" -le 255 ] || return 1; done
+}
+
+# ---------- request parsing (only whitelisted fields are kept) ----------
+F_TOKEN= F_ACTION= F_SSID= F_KEY= F_CHANNEL= F_COUNTRY= F_WIFI_ON=
+F_WANPROTO= F_WANIP= F_WANMASK= F_WANGW= F_WANDNS= F_LANIP= F_APMODE= F_UPGW= F_PASS1= F_PASS2= F_CONFIRM=
+F_ENC= F_AB_ON= F_AB_PRESET= F_AB_MAX= F_AB_ALLOW= F_AB_BLOCK= F_AB_FORCE= F_AB_CHECK=
+parse_post() {
+	[ "$REQUEST_METHOD" = POST ] || return 0
+	len=${CONTENT_LENGTH:-0}
+	case "$len" in ''|*[!0-9]*) len=0 ;; esac
+	[ "$len" -gt 32768 ] && len=32768
+	body=$(dd bs=1 count="$len" 2>/dev/null)
+	oldifs=$IFS; IFS='&'
+	for pair in $body; do
+		k=${pair%%=*}; v=$(urldecode "${pair#*=}")
+		case "$k" in
+			token) F_TOKEN=$v ;; action) F_ACTION=$v ;;
+			ssid) F_SSID=$v ;; key) F_KEY=$v ;; channel) F_CHANNEL=$v ;;
+			country) F_COUNTRY=$v ;; wifi_on) F_WIFI_ON=$v ;;
+			wanproto) F_WANPROTO=$v ;; wanip) F_WANIP=$v ;; wanmask) F_WANMASK=$v ;;
+			wangw) F_WANGW=$v ;; wandns) F_WANDNS=$v ;; lanip) F_LANIP=${v%%/*} ;;
+			apmode) F_APMODE=$v ;; upgw) F_UPGW=$v ;;
+			pass1) F_PASS1=$v ;; pass2) F_PASS2=$v ;; confirm) F_CONFIRM=$v ;;
+			enc) F_ENC=$v ;; ab_on) F_AB_ON=$v ;; ab_preset) F_AB_PRESET=$v ;; ab_max) F_AB_MAX=$v ;;
+			ab_allow) F_AB_ALLOW=$v ;; ab_block) F_AB_BLOCK=$v ;; ab_force) F_AB_FORCE=$v ;; ab_check) F_AB_CHECK=$v ;;
+		esac
+	done
+	IFS=$oldifs
+}
+
+# ---------- actions ----------
+MSG= ERR=
+later() { ( sleep 2; "$@" ) >/dev/null 2>&1 </dev/null & }
+
+set_password() {
+	[ ${#F_PASS1} -ge 8 ] || { ERR="Password must be at least 8 characters."; return; }
+	[ "$F_PASS1" = "$F_PASS2" ] || { ERR="Passwords do not match."; return; }
+	case "$F_PASS1" in *:*) ERR="Password cannot contain ':'."; return ;; esac
+	printf '%s\n%s\n' "$F_PASS1" "$F_PASS1" | passwd root >/dev/null 2>&1 \
+		|| { ERR="Could not set root password."; return; }
+	hash=$(httpd -m "$F_PASS1")
+	umask 077
+	printf 'A:*\n/:root:%s\n' "$hash" > "$HTTPD_CONF.new" && mv "$HTTPD_CONF.new" "$HTTPD_CONF"
+	killall -HUP httpd 2>/dev/null
+	MSG="Password saved. Your browser will now ask you to log in as <b>root</b>. It is also your SSH password."
+}
+
+save_wifi() {
+	n=${#F_SSID}
+	[ "$n" -ge 1 ] && [ "$n" -le 32 ] || { ERR="SSID must be 1-32 characters."; return; }
+	n=${#F_KEY}
+	[ "$n" -ge 8 ] && [ "$n" -le 63 ] || { ERR="Wi-Fi password must be 8-63 characters."; return; }
+	echo "$F_COUNTRY" | grep -qE '^[A-Z]{2}$' || { ERR="Pick your country."; return; }
+	case "$F_CHANNEL" in auto|[1-9]|1[0-3]) ;; *) ERR="Invalid channel."; return ;; esac
+	case "$F_ENC" in sae-mixed|sae|psk2) ;; *) ERR="Invalid security mode."; return ;; esac
+	uci set wireless.radio0.country="$F_COUNTRY"
+	uci set wireless.radio0.channel="$F_CHANNEL"
+	uci set wireless.radio0.disabled=0
+	uci set wireless.default_radio0.ssid="$F_SSID"
+	uci set wireless.default_radio0.encryption="$F_ENC"
+	uci -q delete wireless.default_radio0.ieee80211w  # automatic: optional PMF for mixed, required for WPA3
+	uci set wireless.default_radio0.key="$F_KEY"
+	uci set wireless.default_radio0.wps_pushbutton=0
+	if [ "$F_WIFI_ON" = 1 ]; then uci set wireless.default_radio0.disabled=0
+	else uci set wireless.default_radio0.disabled=1; fi
+	uci commit wireless
+	later wifi reload
+	MSG="Wi-Fi settings saved. Wi-Fi restarts in a few seconds."
+}
+
+save_net() {
+	case "$F_WANPROTO" in
+	dhcp)
+		uci set network.wan.proto=dhcp
+		for o in ipaddr netmask gateway dns; do uci -q delete network.wan.$o; done ;;
+	static)
+		valid_ip "$F_WANIP" && valid_ip "$F_WANMASK" && valid_ip "$F_WANGW" \
+			|| { ERR="WAN static: IP, netmask and gateway must be valid IPv4 addresses."; return; }
+		uci set network.wan.proto=static
+		uci set network.wan.ipaddr="$F_WANIP"
+		uci set network.wan.netmask="$F_WANMASK"
+		uci set network.wan.gateway="$F_WANGW"
+		uci -q delete network.wan.dns
+		for d in $(echo "$F_WANDNS" | tr ',' ' '); do
+			valid_ip "$d" || { ERR="Invalid DNS server: $(esc "$d")"; uci revert network; return; }
+			uci add_list network.wan.dns="$d"
+		done ;;
+	*) ERR="Unknown WAN type."; return ;;
+	esac
+	valid_ip "$F_LANIP" || { ERR="LAN IP must be a valid IPv4 address."; uci revert network; return; }
+	if [ "$F_APMODE" = 1 ]; then
+		valid_ip "$F_UPGW" || { ERR="Access point mode: enter your main router's address (e.g. 192.168.0.1)."; uci revert network; return; }
+		[ "${F_UPGW%.*}" = "${F_LANIP%.*}" ] && [ "$F_UPGW" != "$F_LANIP" ] \
+			|| { ERR="Access point mode: this router's address must be in the same network as the main router (e.g. main 192.168.0.1, this one 192.168.0.2)."; uci revert network; return; }
+	fi
+	old_lan=$(lan_ip)
+	# Always store with an explicit /24 - a bare address would become a /32 (unreachable LAN).
+	uci -q delete network.lan.ipaddr; uci -q delete network.lan.netmask
+	uci add_list network.lan.ipaddr="$F_LANIP/24"
+	uci -q delete network.lan.gateway; uci -q delete network.lan.dns
+	if [ "$F_APMODE" = 1 ]; then
+		uci set network.lan.gateway="$F_UPGW"
+		uci add_list network.lan.dns="$F_UPGW"
+		uci set dhcp.lan.ignore=1
+	else
+		uci -q delete dhcp.lan.ignore
+	fi
+	uci commit network; uci commit dhcp
+	later sh -c '/etc/init.d/network restart; sleep 5; /etc/init.d/dnsmasq restart; /etc/init.d/firewall restart'
+	if [ "$old_lan" != "$F_LANIP" ]; then
+		MSG="Saved. The router is moving to <b>$(esc "$F_LANIP")</b> &mdash; reconnect your cable/Wi-Fi, then open <a href=\"http://$(esc "$F_LANIP")/\">http://$(esc "$F_LANIP")/</a>."
+	else
+		MSG="Network settings saved and applied."
+	fi
+}
+
+AB_LIGHT=https://raw.githubusercontent.com/hagezi/dns-blocklists/main/dnsmasq/light.txt
+AB_LIGHT_M=https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/dnsmasq/light.txt
+AB_MULTI=https://raw.githubusercontent.com/hagezi/dns-blocklists/main/dnsmasq/multi.txt
+AB_MULTI_M=https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/dnsmasq/multi.txt
+
+set_domain_list() { # uci option name, newline/space/comma separated domains
+	uci -q delete "adblock.main.$1"
+	n=0
+	for d in $(printf '%s' "$2" | tr 'A-Z,;\r' 'a-z   '); do
+		/usr/sbin/adblock valid "$d" || { ERR="Not a valid domain: $(esc "$d")"; return 1; }
+		n=$((n + 1)); [ $n -le 200 ] || { ERR="At most 200 entries per list."; return 1; }
+		uci add_list "adblock.main.$1=$d"
+	done
+}
+
+save_adblock() {
+	case "$F_AB_MAX" in ''|*[!0-9]*) ERR="Maximum must be a number."; return ;; esac
+	[ "$F_AB_MAX" -ge 1000 ] && [ "$F_AB_MAX" -le 200000 ] || { ERR="Maximum must be between 1000 and 200000."; return; }
+	case "$F_AB_PRESET" in
+		light) src=$AB_LIGHT; mir=$AB_LIGHT_M ;;
+		multi) src=$AB_MULTI; mir=$AB_MULTI_M ;;
+		*) ERR="Unknown list."; return ;;
+	esac
+	set_domain_list allow "$F_AB_ALLOW" || { uci revert adblock; return; }
+	set_domain_list block "$F_AB_BLOCK" || { uci revert adblock; return; }
+	old_preset=$(u adblock.main.preset); old_force=$(u adblock.main.force_dns); old_on=$(u adblock.main.enabled)
+	[ "$F_AB_ON" = 1 ] || F_AB_ON=0
+	[ "$F_AB_FORCE" = 1 ] || F_AB_FORCE=0
+	uci set adblock.main.enabled="$F_AB_ON"
+	uci set adblock.main.force_dns="$F_AB_FORCE"
+	uci set adblock.main.preset="$F_AB_PRESET"
+	uci set adblock.main.source="$src"
+	uci set adblock.main.mirror="$mir"
+	uci set adblock.main.max_domains="$F_AB_MAX"
+	uci commit adblock
+	[ "$old_force" != "$F_AB_FORCE" ] && later /etc/init.d/firewall restart
+	if [ "$F_AB_ON" != 1 ]; then
+		later /usr/sbin/adblock off; MSG="Ad blocking turned off."
+	elif [ "$old_preset" != "$F_AB_PRESET" ] || [ "$old_on" != 1 ]; then
+		later /usr/sbin/adblock update; MSG="Saved. Downloading the list now &mdash; refresh this page in a minute."
+	else
+		later /usr/sbin/adblock apply; MSG="Saved and applied."
+	fi
+}
+
+check_domain() {
+	d=$(printf '%s' "$F_AB_CHECK" | tr 'A-Z' 'a-z')
+	r=$(/usr/sbin/adblock check "$d")
+	MSG="$(esc "$d"): $(esc "$r")"
+}
+
+# ---------- page parts ----------
+header() {
+	printf 'Content-Type: text/html; charset=utf-8\r\n'
+	printf 'Cache-Control: no-store\r\nX-Frame-Options: DENY\r\n'
+	printf "Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; form-action 'self'\r\n\r\n"
+	cat <<'EOF'
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Router</title><style>
+:root{--bg:#f4f5f7;--card:#fff;--ink:#1d2330;--mut:#667085;--acc:#0b6bcb;--bad:#b42318;--ok:#067647;--line:#e4e7ec}
+@media(prefers-color-scheme:dark){:root{--bg:#111418;--card:#1a1f26;--ink:#e6e9ef;--mut:#98a2b3;--acc:#5aa9ff;--bad:#ff6b5e;--ok:#4cd38a;--line:#2a313b}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 system-ui,sans-serif}
+header{background:var(--card);border-bottom:1px solid var(--line);padding:12px 16px;display:flex;flex-wrap:wrap;gap:6px 18px;align-items:center}
+header b{font-size:17px;margin-right:auto}nav a{color:var(--mut);text-decoration:none;margin-right:14px}nav a.on{color:var(--acc);font-weight:600}
+main{max-width:640px;margin:0 auto;padding:16px}.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:16px}
+h2{font-size:16px;margin:0 0 12px}label{display:block;margin:10px 0 4px;color:var(--mut);font-size:13px}
+input,select,textarea{width:100%;padding:9px;border:1px solid var(--line);border-radius:7px;background:var(--bg);color:var(--ink);font:inherit}
+button{margin-top:14px;padding:9px 16px;border:0;border-radius:7px;background:var(--acc);color:#fff;font:inherit;cursor:pointer}
+button.bad{background:var(--bad)}.msg{padding:10px 12px;border-radius:7px;margin-bottom:16px;border:1px solid var(--ok);color:var(--ok)}
+.err{border-color:var(--bad);color:var(--bad)}table{width:100%;border-collapse:collapse}td{padding:6px 0;border-bottom:1px solid var(--line);vertical-align:top}
+td:first-child{color:var(--mut);width:42%}.row{display:flex;gap:8px;align-items:center}.row input{width:auto}small{color:var(--mut)}
+</style></head><body>
+EOF
+}
+
+nav() {
+	printf '<header><b>%s</b><nav>' "$(esc "$(u system.@system[0].hostname)")"
+	for p in status:Status wifi:Wi-Fi net:Network adblock:Adblock admin:Admin; do
+		id=${p%%:*}; c=; [ "$id" = "$PAGE" ] && c=' class="on"'
+		printf '<a href="?p=%s"%s>%s</a>' "$id" "$c" "${p#*:}"
+	done
+	printf '</nav></header><main>'
+	[ -n "$MSG" ] && printf '<div class="msg">%s</div>' "$MSG"
+	[ -n "$ERR" ] && printf '<div class="msg err">%s</div>' "$ERR"
+}
+
+form_open() { printf '<form method="post" action="?p=%s"><input type="hidden" name="token" value="%s"><input type="hidden" name="action" value="%s">' "$PAGE" "$(token)" "$1"; }
+
+page_setup() {
+	cat <<'EOF'
+<div class="card"><h2>Welcome &mdash; set an admin password</h2>
+<p><small>No password is set yet, so anyone on your network could change settings. Choose one now (min. 8 characters). It protects this page and SSH (user <b>root</b>).</small></p>
+EOF
+	form_open passwd
+	cat <<'EOF'
+<label>New password</label><input type="password" name="pass1" minlength="8" required autocomplete="new-password">
+<label>Repeat password</label><input type="password" name="pass2" minlength="8" required autocomplete="new-password">
+<button>Save password</button></form></div>
+EOF
+}
+
+page_status() {
+	[ -f /lib/functions/network.sh ] && . /lib/functions/network.sh
+	network_flush_cache 2>/dev/null
+	wanip=; wangw=; network_get_ipaddr wanip wan 2>/dev/null; network_get_gateway wangw wan 2>/dev/null
+	up=$(cut -d. -f1 /proc/uptime); d=$((up/86400)); h=$((up%86400/3600)); m=$((up%3600/60))
+	memt=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo)
+	mema=$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo)
+	load=$(cut -d' ' -f1-3 /proc/loadavg)
+	sta=0; for i in $(ls /sys/class/net); do [ -e /sys/class/net/$i/phy80211 ] && sta=$((sta + $(iw dev "$i" station dump 2>/dev/null | grep -c '^Station'))); done
+	[ -f /etc/openwrt_release ] && . /etc/openwrt_release
+	ab_state="Off"; abc=$(sed -n 's/^count=//p' /tmp/adblock.status 2>/dev/null)
+	[ -n "$abc" ] && grep -q '^state=active' /tmp/adblock.status && ab_state="$(esc "$abc") domains blocked"
+	[ "$(u adblock.main.enabled)" = 1 ] && [ "$ab_state" = Off ] && ab_state="Starting (waits for internet)"
+	wifi_state="Off"; [ "$(u wireless.default_radio0.disabled)" = 0 ] && wifi_state="On &mdash; $(esc "$(u wireless.default_radio0.ssid)") ($sta connected)"
+	cat <<EOF
+<div class="card"><h2>Status</h2><table>
+<tr><td>Firmware</td><td>$(esc "${DISTRIB_DESCRIPTION:-OpenWrt}")</td></tr>
+<tr><td>Uptime</td><td>${d}d ${h}h ${m}m</td></tr>
+<tr><td>Load</td><td>$load</td></tr>
+<tr><td>Memory free</td><td>${mema:-?} / ${memt:-?} MB</td></tr>
+<tr><td>Internet (WAN)</td><td>$(esc "$(u network.wan.proto)") &mdash; ${wanip:-not connected}${wangw:+ via $wangw}</td></tr>
+<tr><td>LAN address</td><td>$(esc "$(lan_ip)")</td></tr>
+<tr><td>Wi-Fi</td><td>$wifi_state</td></tr>
+<tr><td>Ad blocking</td><td>$ab_state</td></tr>
+</table></div>
+<div class="card"><h2>Connected devices</h2><table>
+EOF
+	# Wi-Fi: straight from the driver. Wired: everything this router has seen on the LAN ports.
+	# Names/IPs come from this router's DHCP leases or, in access point mode, from the ARP table.
+	wl=$(for i in $(ls /sys/class/net 2>/dev/null); do [ -e /sys/class/net/$i/phy80211 ] && iw dev "$i" station dump 2>/dev/null; done | awk '/^Station/{print $2}')
+	{
+		for m in $wl; do echo "$m wifi"; done
+		awk 'NR>1 && $3=="0x2" && $6=="br-lan"{print $4" wired"}' /proc/net/arp
+	} | awk '!s[$1]++' > /tmp/gui.dev
+	n=0
+	while read -r mac kind; do
+		ip=$(awk -v m="$mac" 'NR>1 && $4==m{print $1; exit}' /proc/net/arp)
+		[ -z "$ip" ] && ip=$(awk -v m="$mac" '$2==m{print $3; exit}' /tmp/dhcp.leases 2>/dev/null)
+		name=$(awk -v m="$mac" '$2==m{print $4; exit}' /tmp/dhcp.leases 2>/dev/null)
+		case "$name" in ''|'*') name="(unknown)" ;; esac
+		[ "$kind" = wifi ] && kind="Wi-Fi" || kind="Cable / main router side"
+		printf '<tr><td>%s<br><small>%s</small></td><td>%s<br><small>%s</small></td></tr>' \
+			"$(esc "$name")" "$kind" "$(esc "${ip:-address given by main router}")" "$(esc "$mac")"
+		n=$((n+1))
+	done < /tmp/gui.dev
+	rm -f /tmp/gui.dev
+	[ $n -eq 0 ] && printf '<tr><td colspan="2"><small>No devices seen yet.</small></td></tr>'
+	printf '</table></div>'
+}
+
+page_wifi() {
+	ssid=$(u wireless.default_radio0.ssid); key=$(u wireless.default_radio0.key)
+	ch=$(u wireless.radio0.channel); cc=$(u wireless.radio0.country)
+	on=; [ "$(u wireless.default_radio0.disabled)" = 0 ] && on=checked
+	[ "$ssid" = OpenWrt ] && [ -z "$key" ] && ssid=
+	enc=$(u wireless.default_radio0.encryption)
+	case "$enc" in sae|psk2*) ;; *) enc=sae-mixed ;; esac
+	printf '<div class="card"><h2>Wi-Fi (2.4 GHz)</h2>'
+	form_open wifi
+	cat <<EOF
+<label class="row"><input type="checkbox" name="wifi_on" value="1" $on> Wi-Fi enabled</label>
+<label>Network name (SSID)</label><input name="ssid" maxlength="32" required value="$(esc "$ssid")">
+<label>Password (8-63 characters)</label><input name="key" minlength="8" maxlength="63" required value="$(esc "$key")">
+<label>Security</label><select name="enc">
+<option value="sae-mixed" $( [ "$enc" = sae-mixed ] && echo selected)>WPA2/WPA3 mixed (recommended)</option>
+<option value="sae" $( [ "$enc" = sae ] && echo selected)>WPA3 only (newest devices only)</option>
+<option value="psk2" $( case "$enc" in psk2*) echo selected;; esac)>WPA2 only (old devices)</option>
+</select>
+<label>Country (sets legal channels and power)</label><select name="country" required>
+EOF
+	[ -z "$cc" ] || [ "$cc" = 00 ] && printf '<option value="">&mdash; choose &mdash;</option>'
+	for c in AT:Austria BE:Belgium BG:Bulgaria CH:Switzerland CY:Cyprus CZ:Czechia DE:Germany DK:Denmark \
+		EE:Estonia ES:Spain FI:Finland FR:France GB:"United Kingdom" GR:Greece HR:Croatia HU:Hungary \
+		IE:Ireland IT:Italy LT:Lithuania LU:Luxembourg LV:Latvia NL:Netherlands NO:Norway PL:Poland \
+		PT:Portugal RO:Romania RS:Serbia SE:Sweden SI:Slovenia SK:Slovakia TR:Turkey UA:Ukraine US:"United States"; do
+		s=; [ "${c%%:*}" = "$cc" ] && s=selected
+		printf '<option value="%s" %s>%s</option>' "${c%%:*}" "$s" "${c#*:}"
+	done
+	printf '</select><label>Channel</label><select name="channel">'
+	for c in auto 1 2 3 4 5 6 7 8 9 10 11 12 13; do
+		s=; [ "$c" = "$ch" ] && s=selected
+		printf '<option %s>%s</option>' "$s" "$c"
+	done
+	printf '</select><button>Save &amp; apply</button></form></div>'
+}
+
+page_net() {
+	proto=$(u network.wan.proto); sd=; st=; apc=
+	[ "$(u dhcp.lan.ignore)" = 1 ] && apc=checked
+	[ "$proto" = static ] && st=selected || sd=selected
+	printf '<div class="card"><h2>Internet (WAN port)</h2>'
+	form_open net
+	cat <<EOF
+<label>Connection type</label><select name="wanproto"><option value="dhcp" $sd>Automatic (DHCP)</option><option value="static" $st>Static IP</option></select>
+<small>Static fields are only used when "Static IP" is selected.</small>
+<label>Static IP address</label><input name="wanip" value="$(esc "$(u network.wan.ipaddr)")" placeholder="e.g. 192.168.0.50">
+<label>Netmask</label><input name="wanmask" value="$(esc "$(u network.wan.netmask)")" placeholder="255.255.255.0">
+<label>Gateway</label><input name="wangw" value="$(esc "$(u network.wan.gateway)")">
+<label>DNS servers (comma separated)</label><input name="wandns" value="$(esc "$(u network.wan.dns | tr ' ' ',')")" placeholder="1.1.1.1,9.9.9.9">
+</div><div class="card"><h2>Local network (LAN)</h2>
+<label>Router address</label><input name="lanip" required value="$(esc "$(lan_ip)")">
+<small>Changing this moves the GUI to the new address (network size is always 255.255.255.0).</small>
+<label class="row"><input type="checkbox" name="apmode" value="1" $apc> Access point mode</label>
+<small>Use when a cable goes from your main router's LAN port to a yellow LAN port here. This router stops handing out addresses; the main router does it. Give this router a free address in the main router's network.</small>
+<label>Main router address</label><input name="upgw" value="$(esc "$(u network.lan.gateway)")" placeholder="192.168.0.1">
+<button>Save &amp; apply</button></form></div>
+EOF
+}
+
+page_adblock() {
+	st=; cnt=; tot=; upd=; err=; mf=
+	if [ -f /tmp/adblock.status ]; then
+		while IFS='=' read -r k v; do
+			case "$k" in state) st=$v ;; count) cnt=$v ;; total) tot=$v ;; updated) upd=$v ;; error) err=$v ;; memfree) mf=$v ;; esac
+		done < /tmp/adblock.status
+	fi
+	on=; [ "$(u adblock.main.enabled)" = 1 ] && on=checked
+	fd=; [ "$(u adblock.main.force_dns)" = 1 ] && fd=checked
+	pre=$(u adblock.main.preset); max=$(u adblock.main.max_domains)
+	allow=$(u adblock.main.allow | tr ' ' '\n'); block=$(u adblock.main.block | tr ' ' '\n')
+	case "$st" in
+		active) lim=; [ -n "$tot" ] && [ "$cnt" -lt "$tot" ] 2>/dev/null && lim=" (of $(esc "$tot") in the list &mdash; trimmed to fit this router's memory)"
+			s="<b>Active</b> &mdash; $(esc "$cnt") domains blocked$lim<br><small>List updated $(esc "$upd") &middot; ${mf:-?} MB RAM free</small>" ;;
+		updating) s="Updating&hellip;" ;;
+		waiting|error) s="<b>Not active:</b> $(esc "$err")" ;;
+		off|'') s="Off" ;;
+		*) s=$(esc "$st") ;;
+	esac
+	printf '<div class="card"><h2>Ad blocking</h2><table><tr><td>Status</td><td>%s</td></tr></table>' "$s"
+	form_open ab_update; printf '<button>Update list now</button></form></div>'
+	printf '<div class="card"><h2>Check a domain</h2>'
+	form_open ab_check
+	printf '<label>Domain</label><input name="ab_check" placeholder="ads.example.com" required><button>Check</button></form></div>'
+	printf '<div class="card"><h2>Settings</h2>'
+	form_open adblock
+	cat <<EOF
+<label class="row"><input type="checkbox" name="ab_on" value="1" $on> Block ads and trackers for every device</label>
+<label>Blocklist (HaGeZi)</label><select name="ab_preset">
+<option value="light" $( [ "$pre" = light ] && echo selected)>Light &mdash; ~57,000 domains (recommended for this router)</option>
+<option value="multi" $( [ "$pre" = multi ] && echo selected)>Normal &mdash; ~160,000 domains (trimmed to fit RAM)</option>
+</select>
+<label>Maximum domains (RAM guard)</label><input name="ab_max" inputmode="numeric" value="$(esc "$max")">
+<small>The router also lowers this automatically if memory gets tight.</small>
+<label>Never block (one domain per line, subdomains included)</label><textarea name="ab_allow" rows="4">$(esc "$allow")</textarea>
+<label>Always block (one domain per line)</label><textarea name="ab_block" rows="4">$(esc "$block")</textarea>
+<label class="row"><input type="checkbox" name="ab_force" value="1" $fd> Force all devices to use the router's DNS (also blocks DNS-over-TLS)</label>
+<button>Save &amp; apply</button></form></div>
+EOF
+}
+
+page_admin() {
+	printf '<div class="card"><h2>Change admin password</h2>'
+	form_open passwd
+	cat <<'EOF'
+<label>New password</label><input type="password" name="pass1" minlength="8" required autocomplete="new-password">
+<label>Repeat password</label><input type="password" name="pass2" minlength="8" required autocomplete="new-password">
+<button>Save password</button></form></div>
+<div class="card"><h2>Reboot</h2>
+EOF
+	form_open reboot; printf '<button>Reboot now</button></form></div>'
+	printf '<div class="card"><h2>Factory reset</h2><p><small>Erases all settings and restarts at 192.168.1.1 with no password.</small></p>'
+	form_open reset
+	printf '<label class="row"><input type="checkbox" name="confirm" value="yes" required> Yes, erase everything</label><button class="bad">Factory reset</button></form></div>'
+	printf '<div class="card"><h2>Firmware upgrade</h2><p><small>On your computer run <code>cat file-sysupgrade.bin | ssh root@%s &#39;cat &gt; /tmp/fw.bin &amp;&amp; sysupgrade /tmp/fw.bin&#39;</code></small></p></div>' "$(esc "$(lan_ip)")"
+}
+
+page_wait() {
+	printf '<div class="card"><h2>%s</h2><p>The router is restarting. Wait about a minute, then <a href="/">reload</a>.</p></div>' "$1"
+}
+
+# ---------- main ----------
+PAGE=$(printf '%s' "$QUERY_STRING" | sed -n 's/.*p=\([a-z]*\).*/\1/p')
+case "$PAGE" in status|wifi|net|adblock|admin) ;; *) PAGE=status ;; esac
+parse_post
+
+if [ "$REQUEST_METHOD" = POST ]; then
+	if [ -z "$F_TOKEN" ] || [ "$F_TOKEN" != "$(token)" ]; then
+		ERR="Form expired or invalid (security token mismatch). Please try again."
+	elif ! gui_has_password && root_has_password; then
+		ERR="Web GUI is locked. Run webgui-passwd over SSH."
+	elif ! gui_has_password && [ "$F_ACTION" != passwd ]; then
+		ERR="Set a password first."
+	else
+		case "$F_ACTION" in
+			passwd) set_password ;;
+			wifi) save_wifi ;;
+			net) save_net ;;
+			adblock) save_adblock ;;
+			ab_update) later /usr/sbin/adblock update; MSG="Updating the blocklist now. Refresh this page in a minute." ;;
+			ab_check) check_domain ;;
+			reboot) header; PAGE=admin; nav; page_wait "Rebooting"; printf '</main></body></html>'; later reboot; exit 0 ;;
+			reset) if [ "$F_CONFIRM" = yes ]; then
+					header; PAGE=admin; nav; page_wait "Resetting to factory defaults"; printf '</main></body></html>'
+					later sh -c 'firstboot -y && reboot'; exit 0
+				fi; ERR="Tick the confirmation box." ;;
+		esac
+	fi
+fi
+
+header; nav
+if gui_has_password; then
+	case "$PAGE" in
+		status) page_status ;; wifi) page_wifi ;; net) page_net ;; adblock) page_adblock ;; admin) page_admin ;;
+	esac
+elif root_has_password; then
+	printf '<div class="card"><h2>Web GUI locked</h2><p>The root password was set over SSH, so the web GUI has no password yet. Log in with SSH and run <code>webgui-passwd</code> to set one password for both.</p></div>'
+else
+	page_setup
+fi
+printf '</main></body></html>\n'

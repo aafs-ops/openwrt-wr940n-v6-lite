@@ -1,0 +1,193 @@
+#!/bin/sh
+# Pi-hole style DNS ad blocking on dnsmasq for a 4 MB / 32 MB router.
+# The blocklist lives in RAM (/tmp) and is re-downloaded over HTTPS at boot and daily.
+#   adblock update   download + apply (used by boot hotplug, cron and the GUI)
+#   adblock apply    rebuild from the last download (after allow/block list edits)
+#   adblock off      remove the blocklist from dnsmasq
+#   adblock check D  is domain D blocked?
+
+CA=/etc/adblock/roots.pem
+DL=/tmp/adblock.download
+DOMAINS=/tmp/adblock.domains
+OUT_DIR=/tmp/dnsmasq.d
+OUT=$OUT_DIR/adblock.conf
+STATUS=/tmp/adblock.status
+LOCK=/var/lock/adblock.lock
+
+log() { logger -t adblock "$*"; }
+setstatus() { # key=value lines
+	printf '%s\n' "$@" > "$STATUS.new" && mv "$STATUS.new" "$STATUS"
+}
+u() { uci -q get "adblock.main.$1"; }
+
+restart_dnsmasq() {
+	/etc/init.d/dnsmasq restart >/dev/null 2>&1
+	sleep 2
+	pidof dnsmasq >/dev/null
+}
+
+mem_avail_kb() { awk '/^MemAvailable:/{print $2}' /proc/meminfo; }
+
+wait_for_clock() {
+	# TLS certificate checks need the real time. Wait for NTP (marker written by hotplug.d/ntp),
+	# up to 3 minutes; the NTP hook starts another update by itself once the clock is synced.
+	n=0
+	while [ ! -f /tmp/ntp.synced ]; do
+		n=$((n + 1)); [ $n -gt 36 ] && return 1
+		sleep 5
+	done
+}
+
+download() {
+	for url in $(u source) $(u mirror); do
+		rm -f "$DL"
+		if uclient-fetch -q -T 30 --ca-certificate="$CA" -O "$DL" "$url" 2>/dev/null && [ -s "$DL" ]; then
+			echo "$url"; return 0
+		fi
+		log "download failed: $url"
+	done
+	return 1
+}
+
+# Accepts dnsmasq (local=/x/, address=/x/...), hosts (0.0.0.0 x) and plain/adblock (||x^) formats.
+normalize() {
+	tr 'A-Z\r' 'a-z\n' | sed -E -n \
+		-e 's/[[:space:]]*#.*$//' \
+		-e 's/^[[:space:]]+//' \
+		-e 's/^(local|address|server)=\/([^/]*)\/.*$/\2/' \
+		-e 's/^(0\.0\.0\.0|127\.0\.0\.1|::|::1)[[:space:]]+//' \
+		-e 's/^\|\|([^^]*)\^.*$/\1/' \
+		-e 's/[[:space:]].*$//' \
+		-e '/^[a-z0-9_]([a-z0-9_-]*\.)+[a-z0-9-]+$/p' |
+	awk 'length($0) < 254 && $0 != "localhost" && $0 != "local"'
+}
+
+valid_domain() {
+	echo "$1" | grep -qE '^([a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}$'
+}
+
+# Free the RAM the current blocklist uses (in dnsmasq and in /tmp) before measuring.
+drop_current() {
+	[ -e "$OUT" ] || return 0
+	rm -f "$OUT"; restart_dnsmasq
+}
+
+# Cost per blocked domain: ~64 bytes inside dnsmasq + ~22 bytes for the file in /tmp (RAM)
+# => about 12 domains per KB. Always keep RESERVE KB free for Wi-Fi, web page, SSH etc.
+PER_KB=12
+RESERVE=4096
+MIN_LEFT=3072	# after loading: if less than this is free, halve the list and try again
+
+build() { # $1 = max domains
+	[ -s "$DOMAINS" ] || return 1
+	max=$1
+	allow=$(uci -q get adblock.main.allow | tr ' ' '\n' | grep . )
+	block=$(uci -q get adblock.main.block | tr ' ' '\n' | grep . )
+	mkdir -p "$OUT_DIR"
+	# 25 domains per line (local=/a/b/c/...) keeps the file in RAM ~25% smaller.
+	{ printf '%s\n' "$block"; cat "$DOMAINS"; } | grep . |
+	awk -v allow="$allow" -v max="$max" '
+		BEGIN { n = split(allow, a, "\n"); for (i = 1; i <= n; i++) if (a[i] != "") ok[a[i]] = 1 }
+		{
+			d = $0
+			if (d in seen) next
+			seen[d] = 1
+			x = d	# allowlisted domain or any of its parent domains
+			while (1) {
+				if (x in ok) next
+				p = index(x, "."); if (p == 0) break
+				x = substr(x, p + 1)
+			}
+			if (++c > max) exit
+			line = line d "/"
+			if (++k == 25 || length(line) > 900) { print "local=/" line; line = ""; k = 0 }
+		}
+		END { if (line != "") print "local=/" line; print c + 0 > "/tmp/adblock.count" }' > "$OUT.new" || return 1
+	count=$(cat /tmp/adblock.count); rm -f /tmp/adblock.count
+	[ "$count" -gt "$max" ] && count=$max
+	mv "$OUT.new" "$OUT"
+	echo "$count"
+}
+
+do_apply() {
+	drop_current
+	total=$(wc -l < "$DOMAINS")
+	max=$(u max_domains); case "$max" in ''|*[!0-9]*) max=60000 ;; esac
+	# the downloaded list file in /tmp is deleted after loading, so its RAM counts as available
+	avail=$(( $(mem_avail_kb) + $(wc -c < "$DOMAINS") / 1024 ))
+	cap=$(( (avail - RESERVE) * PER_KB ))
+	[ "$cap" -lt "$max" ] && max=$cap
+	while :; do
+		[ "$max" -lt 1000 ] && { log "not enough free RAM for a blocklist (${avail} KB)"; rm -f "$OUT"; restart_dnsmasq; return 2; }
+		count=$(build "$max") || { rm -f "$OUT"; restart_dnsmasq; return 1; }
+		if ! restart_dnsmasq; then
+			# Fail safe: never leave the network without DNS.
+			log "dnsmasq refused the blocklist, removing it"
+			rm -f "$OUT"; restart_dnsmasq
+			return 1
+		fi
+		free_now=$(( $(mem_avail_kb) + $(wc -c < "$DOMAINS") / 1024 ))
+		[ "$free_now" -ge "$MIN_LEFT" ] && break
+		log "only ${free_now} KB left with $count domains, trying half"
+		max=$(( count / 2 ))
+		drop_current
+	done
+	rm -f "$DOMAINS"	# frees ~1 MB of RAM; "apply" re-downloads when needed
+	echo "$count $total"
+}
+
+cmd_update() {
+	[ "$(u enabled)" = 1 ] || { cmd_off; return 0; }
+	wait_for_clock || { setstatus state=waiting "error=Clock not set yet (waiting for internet time)"; return 1; }
+	setstatus state=updating
+	src=$(download) || { setstatus state=error "error=Could not download the blocklist" "updated=$(cat /tmp/adblock.updated 2>/dev/null)"; return 1; }
+	normalize < "$DL" > "$DOMAINS.new"; rm -f "$DL"
+	n=$(wc -l < "$DOMAINS.new")
+	[ "$n" -ge 100 ] || { rm -f "$DOMAINS.new"; setstatus state=error "error=Downloaded list looked wrong ($n domains)"; return 1; }
+	mv "$DOMAINS.new" "$DOMAINS"
+	date '+%Y-%m-%d %H:%M' > /tmp/adblock.updated
+	cmd_apply "$src"
+}
+
+cmd_apply() {
+	[ "$(u enabled)" = 1 ] || { cmd_off; return 0; }
+	[ -s "$DOMAINS" ] || { cmd_update; return; }
+	res=$(do_apply); rc=$?
+	count=${res%% *}; total=${res##* }
+	case $rc in
+		0) setstatus state=active "count=$count" "total=$total" "source=${1:-$(cat /tmp/adblock.source 2>/dev/null)}" "updated=$(cat /tmp/adblock.updated 2>/dev/null)" "memfree=$(( $(mem_avail_kb) / 1024 ))"
+		   [ -n "$1" ] && echo "$1" > /tmp/adblock.source
+		   log "active: $count domains blocked" ;;
+		2) setstatus state=error "error=Not enough free memory for the blocklist" ;;
+		*) setstatus state=error "error=Blocklist could not be applied" ;;
+	esac
+	return $rc
+}
+
+cmd_off() {
+	rm -f "$OUT" "$DOMAINS"
+	restart_dnsmasq
+	setstatus state=off
+}
+
+cmd_check() {
+	d=$(echo "$1" | tr 'A-Z' 'a-z')
+	valid_domain "$d" || { echo invalid; return 2; }
+	[ -s "$OUT" ] || { echo "not blocked"; return 1; }
+	x=$d
+	while :; do
+		grep -qF "/$x/" "$OUT" && { echo "blocked (by $x)"; return 0; }
+		case "$x" in *.*) x=${x#*.} ;; *) break ;; esac
+	done
+	echo "not blocked"; return 1
+}
+
+case "$1" in
+	update|apply|off)
+		exec 9>"$LOCK"
+		flock -n 9 || { echo "busy"; exit 1; }
+		"cmd_$1" ;;
+	check) cmd_check "$2" ;;
+	valid) valid_domain "$2" ;;
+	*) echo "usage: $0 update|apply|off|check <domain>"; exit 1 ;;
+esac
